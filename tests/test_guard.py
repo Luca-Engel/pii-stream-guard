@@ -6,6 +6,7 @@ from pii_stream_guard import Detector, StreamingGuard, redact
 
 EMAIL_TOKEN = "[REDACTED_EMAIL]"
 AHV_TOKEN = "[REDACTED_AHV]"
+MARKER = "[TRUNCATED]"
 
 
 # --- Spec example ---
@@ -104,6 +105,54 @@ def test_finish_twice_raises() -> None:
         guard.finish()
 
 
+# --- Output budget ---
+
+
+def test_output_that_fits_exactly_is_not_truncated() -> None:
+    guard = StreamingGuard(max_output_chars=12)
+    assert guard.push("Hello world!") + guard.finish() == "Hello world!"
+
+
+def test_output_that_does_not_fit_is_cut_and_marked() -> None:
+    # 9 characters of text plus the 11-character marker fill the budget of 20.
+    guard = StreamingGuard(max_output_chars=20)
+    output = guard.push("Hello world, how are you?") + guard.finish()
+    assert output == f"Hello wor{MARKER}"
+
+
+def test_token_that_does_not_fit_is_left_out() -> None:
+    guard = StreamingGuard(max_output_chars=20)
+    output = guard.push("Mail: max@example.ch, thanks") + guard.finish()
+    assert output == f"Mail: {MARKER}"
+
+
+def test_text_that_only_looks_like_a_token_is_cut_as_plain_text() -> None:
+    # The LLM wrote the token text itself. It is not a redaction, so it can be cut.
+    guard = StreamingGuard(max_output_chars=20)
+    output = guard.push("Mail: [REDACTED_EMAIL], thanks") + guard.finish()
+    assert output == f"Mail: [RE{MARKER}"
+
+
+def test_long_sensitive_data_can_fit_once_redacted() -> None:
+    # The 51-character email is longer than the budget, but its token is not.
+    guard = StreamingGuard(max_output_chars=30)
+    assert guard.push("a" * 40 + "@example.ch") + guard.finish() == EMAIL_TOKEN
+
+
+def test_marker_is_sent_as_soon_as_the_output_cannot_fit() -> None:
+    guard = StreamingGuard(max_output_chars=12)
+    assert guard.push("Hello world!") == "H"  # the rest may still fit exactly
+    assert guard.push("x") == MARKER  # now the output is too long
+    assert guard.push("ignored") == ""
+    assert guard.finish() == ""
+
+
+@pytest.mark.parametrize("max_output_chars", [10, 0, -1])
+def test_budget_shorter_than_marker_is_rejected(max_output_chars: int) -> None:
+    with pytest.raises(ValueError, match="at least 11"):
+        StreamingGuard(max_output_chars=max_output_chars)
+
+
 # --- Properties: any text, any chunking ---
 
 # Building blocks that often form, break or nearly form sensitive data.
@@ -135,19 +184,44 @@ TEXTS = [
 ]
 
 
+def assert_streams_as(
+    expected: str, guard: StreamingGuard, text: str, chunk_size: int
+) -> None:
+    released = ""
+    for i in range(0, len(text), chunk_size):
+        released += guard.push(text[i : i + chunk_size])
+        # Never release anything the final output does not start with: no
+        # partial leaks, and nothing that later chunks could change.
+        assert expected.startswith(released), text
+    assert released + guard.finish() == expected, text
+
+
 @pytest.mark.parametrize("chunk_size", range(1, 11))
 def test_output_matches_redact_for_any_chunking(chunk_size: int) -> None:
     for text in TEXTS:
-        chunks = [text[i : i + chunk_size] for i in range(0, len(text), chunk_size)]
-        expected = redact(text)
-        guard = StreamingGuard()
-        released = ""
-        for chunk in chunks:
-            released += guard.push(chunk)
-            # Never release anything the final output does not start with: no
-            # partial leaks, and nothing that later chunks could change.
-            assert expected.startswith(released), text
-        assert released + guard.finish() == expected, text
+        assert_streams_as(redact(text), StreamingGuard(), text, chunk_size)
+
+
+def truncate(redacted: str, max_output_chars: int) -> str:
+    """Expected guard output: redacted text cut to fit the budget with the marker."""
+    if len(redacted) <= max_output_chars:
+        return redacted
+
+    kept = redacted[: max_output_chars - len(MARKER)]
+    # The test texts contain no brackets, so an unclosed "[" starts a cut token.
+    if kept.count("[") > kept.count("]"):
+        kept = kept[: kept.rindex("[")]
+    return kept + MARKER
+
+
+@pytest.mark.parametrize("max_output_chars", [11, 30, 100])
+@pytest.mark.parametrize("chunk_size", range(1, 11))
+def test_truncated_output_matches_truncated_redact_for_any_chunking(
+    max_output_chars: int, chunk_size: int
+) -> None:
+    for text in TEXTS:
+        expected = truncate(redact(text), max_output_chars)
+        assert_streams_as(expected, StreamingGuard(max_output_chars), text, chunk_size)
 
 
 # --- Bounded hold-back: constant memory and linear time ---
