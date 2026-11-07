@@ -8,12 +8,14 @@ from pii_stream_guard.detectors import (
     compile_detectors,
     redact,
 )
+from pii_stream_guard.guard import StreamingGuard
 
 __all__ = [
     "AHV_DETECTOR",
     "DEFAULT_DETECTORS",
     "EMAIL_DETECTOR",
     "Detector",
+    "StreamingGuard",
     "compile_detectors",
     "redact",
 ]
