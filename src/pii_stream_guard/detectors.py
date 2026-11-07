@@ -9,6 +9,9 @@ Rules for detector patterns:
 * Use bounded quantifiers only (``{1,64}``, never ``+`` or ``*``). This bounds
   how much text the streaming guard must hold back and keeps processing linear.
 * If a boundary is needed, express it with lookarounds, e.g. ``(?<!\d)...(?!\d)``.
+  A lookbehind ``(?<=...)`` or ``(?<!...)`` must declare how many characters it
+  looks back (``lookbehind=1`` for ``(?<!\d)``). Anchors that look back one
+  character, such as ``\b`` or ``^``, need no declaration.
 * The pattern must not match the empty string.
 
 Detectors are tried in order, so earlier detectors win when two patterns match
@@ -23,10 +26,24 @@ import regex
 
 @dataclass(frozen=True, slots=True)
 class Detector:
-    """A kind of sensitive data, recognised by one regular expression."""
+    r"""A kind of sensitive data, found by one regex.
+
+    Attributes:
+        name: Detector name, e.g. ``"PHONE"``. Gives the token ``"[REDACTED_PHONE]"``.
+            Must be a valid Python identifier.
+        pattern: Regex for the sensitive data. See the module docstring for the rules.
+        lookbehind: How many characters a lookbehind looks at before a match,
+            e.g. ``1`` for ``(?<!\d)``. Keep ``0`` if the pattern has no lookbehind.
+            Anchors like ``\b`` and ``^`` need no declaration.
+
+    Example:
+        >>> Detector("ZIP", r"(?<!\d)\d{4}", lookbehind=1).token
+        '[REDACTED_ZIP]'
+    """
 
     name: str
     pattern: str
+    lookbehind: int = 0
 
     @property
     def token(self) -> str:
@@ -55,7 +72,18 @@ DEFAULT_DETECTORS: tuple[Detector, ...] = (EMAIL_DETECTOR, AHV_DETECTOR)
 
 
 def compile_detectors(detectors: Sequence[Detector]) -> regex.Pattern[str]:
-    """Compile detectors into one alternation of named groups, in priority order."""
+    """Combine detectors into one regex.
+
+    Args:
+        detectors: Detectors in priority order. If two match at the same position,
+            the earlier one wins.
+
+    Returns:
+        The compiled regex. ``match.lastgroup`` is the name of the matching detector.
+
+    Raises:
+        ValueError: If no detectors are given or a pattern breaks a rule.
+    """
     if not detectors:
         raise ValueError("at least one detector is required")
     for detector in detectors:
@@ -65,8 +93,16 @@ def compile_detectors(detectors: Sequence[Detector]) -> regex.Pattern[str]:
             raise ValueError(
                 f"detector {detector.name!r} must not match the empty string"
             )
+        # Without the declared width, the streaming guard would drop the text
+        # the lookbehind needs once it has been released.
+        has_lookbehind = "(?<=" in detector.pattern or "(?<!" in detector.pattern
+        if has_lookbehind and detector.lookbehind == 0:
+            raise ValueError(
+                f"detector {detector.name!r} uses a lookbehind. "
+                "Set lookbehind to the number of characters it looks back"
+            )
     # One named group per detector, e.g. "(?P<EMAIL>...)|(?P<AHV>...)". The group
-    # name tells which detector matched; earlier alternatives win at the same position.
+    # name tells which detector matched. Earlier alternatives win at the same position.
     alternation = "|".join(f"(?P<{d.name}>{d.pattern})" for d in detectors)
     return regex.compile(alternation)
 
@@ -74,8 +110,18 @@ def compile_detectors(detectors: Sequence[Detector]) -> regex.Pattern[str]:
 def redact(text: str, detectors: Sequence[Detector] = DEFAULT_DETECTORS) -> str:
     """Replace every match in ``text`` with its detector's token.
 
-    This is the non-streaming reference: the streaming guard must produce
-    exactly this output, however its input is chunked.
+    Works on the complete text at once. The streaming guard must give the same
+    result, however the text is chunked.
+
+    Args:
+        text: Text to redact.
+        detectors: Detectors in priority order.
+
+    Returns:
+        The redacted text.
+
+    Raises:
+        ValueError: If the detectors are invalid.
     """
     tokens = {d.name: d.token for d in detectors}
 

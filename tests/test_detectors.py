@@ -71,14 +71,11 @@ def test_long_local_part_is_redacted_up_to_the_limit() -> None:
     assert redact("a" * 100 + "@example.ch") == "a" * 36 + EMAIL_TOKEN
 
 
-def test_token_is_derived_from_name() -> None:
-    assert Detector("PHONE", r"\d{3}").token == "[REDACTED_PHONE]"
-
-
 def test_custom_detector_extends_redaction() -> None:
     phone_detector = Detector(
         "PHONE",
         r"(?<![\d+])(\+41|0041|0)[ ]?[1-9]\d(?:[ ]?\d{3})(?:[ ]?\d{2}){2}(?!\d)",
+        lookbehind=1,
     )
     detectors = (*DEFAULT_DETECTORS, phone_detector)
     text = "Call +41 44 421 62 89 or 044 421 62 89, mail max@example.ch"
@@ -99,6 +96,7 @@ def test_detector_order_sets_priority_at_same_position() -> None:
     [
         ((), "at least one detector"),
         ((Detector("X", r"\d{0,3}"),), "empty string"),
+        ((Detector("X", r"(?<!\d)\d{3}"),), "lookbehind"),
     ],
 )
 def test_invalid_detector_sets_are_rejected(
