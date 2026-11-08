@@ -14,7 +14,7 @@ build-backend = "uv_build"
 
 [tool.mypy]
 strict = true
-files = ["src", "tests"]
+files = ["src", "tests", "examples"]
 
 [dependency-groups]
 dev = [
